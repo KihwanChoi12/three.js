@@ -24,111 +24,115 @@
 		<script type="module">
 
 			import * as THREE from 'three';
-			import { texture, textureStore, tslFn, instanceIndex, float, uvec2, vec4, MeshBasicNodeMaterial } from 'three/nodes';
-
-			import WebGPU from 'three/addons/capabilities/WebGPU.js';
+			import { texture, uv, MeshBasicNodeMaterial, attribute, uniform, vec3, vec4, wgslFn, float } from 'three/nodes';
+			import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+			import Stats from 'three/addons/libs/stats.module.js';
 			import WebGPURenderer from 'three/addons/renderers/webgpu/WebGPURenderer.js';
-			import StorageTexture from 'three/addons/renderers/common/StorageTexture.js';
 
-			let camera, scene, renderer;
+
+			const scene = new THREE.Scene();
+			scene.background = new THREE.Color( 0x00001f );
+			const renderer = new WebGPURenderer();
+			renderer.setPixelRatio( window.devicePixelRatio );
+			renderer.setSize( window.innerWidth, window.innerHeight );
+			document.body.appendChild( renderer.domElement );
+			const aspect = window.innerWidth / window.innerHeight;
+			const camera = new THREE.OrthographicCamera( - aspect, aspect, 1, - 1, 0, 2 );
+			camera.position.z = 1;
+
+			// const controls = new OrbitControls( camera, renderer.domElement );
+			let material;
+
+			window.addEventListener( 'resize', onWindowResize, false );
 
 			init();
 			render();
 
+
 			function init() {
 
-				if ( WebGPU.isAvailable() === false ) {
+				const uvTexture = new THREE.TextureLoader().load( 'https://picsum.photos/670/670' );
+				const textureNode = texture( uvTexture );
 
-					document.body.appendChild( WebGPU.getErrorMessage() );
 
-					throw new Error( 'No WebGPU support' );
+				const wgslPositionParams = {
+					time: uniform( 0 ),
+					position: attribute( 'position' ),
+				};
 
-				}
+				const wgslPositionShader = wgslFn( `
+					fn mainFunction( time: f32, position: vec3<f32>, ) -> vec4<f32> {
 
-				const aspect = window.innerWidth / window.innerHeight;
-				camera = new THREE.OrthographicCamera( - aspect, aspect, 1, - 1, 0, 2 );
-				camera.position.z = 1;
+						return vec4<f32>(position * (1.2 + 0.25 * sin(time)), 1.0);
+					
+					}
+				` );
 
-				scene = new THREE.Scene();
 
-				// texture
+				const wgslColorParams = {
+					tex: textureNode,
+					tex_sampler: textureNode,
+					uv: uv(),
+					opacity: uniform( 1.0 )
+				};
 
-				const width = 512, height = 512;
+				const wgslColorShader = wgslFn( ` 
+					fn mainFunction(
+						tex: texture_2d<f32>, 
+						tex_sampler: sampler, 
+						uv:vec2<f32>,
+						opacity: f32,
+					) -> vec4<f32> {
+					
+						var sample1 = textureSample( tex, tex_sampler, uv );
+						var sigDist: f32 = median(sample1.r, sample1.g, sample1.b) - 0.5;
+						var alpha: f32 = clamp(sigDist/fwidth(sigDist) + 0.5, 0.0, 1.0);
+						
+						var outColor: vec4<f32> = sample1;
+						
+						return vec4<f32>(outColor);
+					}
+					
+					fn median(r: f32, g: f32, b: f32) -> f32 {
+						return max(min(r, g), min(max(r, g), b));
+					} 
+				` );
 
-				const storageTexture = new StorageTexture( width, height );
-				//storageTexture.minFilter = THREE.LinearMipMapLinearFilter;
 
-				// create function
+				material = new MeshBasicNodeMaterial();
+				material.positionNode = wgslPositionShader( wgslPositionParams );
+				material.colorNode = wgslColorShader( wgslColorParams );
 
-				const computeTexture = tslFn( ( { storageTexture } ) => {
+				const width = window.innerWidth;
+				const height = window.innerHeight;
 
-					const posX = instanceIndex.remainder( width );
-					const posY = instanceIndex.div( width );
-					const indexUV = uvec2( posX, posY );
-
-					// https://www.shadertoy.com/view/Xst3zN
-
-					const x = float( posX ).div( 50.0 );
-					const y = float( posY ).div( 50.0 );
-
-					const v1 = x.sin();
-					const v2 = y.sin();
-					const v3 = x.add( y ).sin();
-					const v4 = x.mul( x ).add( y.mul( y ) ).sqrt().add( 5.0 ).sin();
-					const v = v1.add( v2, v3, v4 );
-
-					const r = v.sin();
-					const g = v.add( Math.PI ).sin();
-					const b = v.add( Math.PI ).sub( 0.5 ).sin();
-
-					textureStore( storageTexture, indexUV, vec4( r, g, b, 1 ) );
-
-				} );
-
-				// compute
-
-				const computeNode = computeTexture( { storageTexture } ).compute( width * height );
-
-				const material = new MeshBasicNodeMaterial( { color: 0x00ff00 } );
-				material.colorNode = texture( storageTexture );
-
-				const plane = new THREE.Mesh( new THREE.PlaneGeometry( 1, 1 ), material );
+				const geometry = new THREE.PlaneGeometry( 1, 1 );
+				const plane = new THREE.Mesh( geometry, material );
 				scene.add( plane );
 
-				renderer = new WebGPURenderer( { antialias: true } );
-				renderer.setPixelRatio( window.devicePixelRatio );
-				renderer.setSize( window.innerWidth, window.innerHeight );
-				document.body.appendChild( renderer.domElement );
-
-				// compute texture
-				renderer.compute( computeNode );
-
-				window.addEventListener( 'resize', onWindowResize );
-
 			}
 
-			function onWindowResize() {
-
-				renderer.setSize( window.innerWidth, window.innerHeight );
-
-				const aspect = window.innerWidth / window.innerHeight;
-
-				const frustumHeight = camera.top - camera.bottom;
-
-				camera.left = - frustumHeight * aspect / 2;
-				camera.right = frustumHeight * aspect / 2;
-
-				camera.updateProjectionMatrix();
-
-				render();
-
-			}
 
 			function render() {
+
+				requestAnimationFrame( render );
+
+				material.positionNode.parameters.time.value += 0.005;
 
 				renderer.renderAsync( scene, camera );
 
 			}
+
+
+			function onWindowResize() {
+
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+				renderer.setSize( window.innerWidth, window.innerHeight );
+
+			}
+
+
 
 		</script>
 	</body>
